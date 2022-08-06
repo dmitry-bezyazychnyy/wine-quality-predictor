@@ -1,0 +1,11 @@
+name: wine-quality-predictor
+channels:
+  - defaults
+dependencies:
+  - numpy
+  - pandas
+  - scikit-learn
+  - pip
+  - pip:
+    - mlflow
+    - boto3

@@ -1,0 +1,23 @@
+FROM python:3.9.13-slim
+
+ENV PATH="/root/miniconda3/bin:${PATH}"
+ARG PATH="/root/miniconda3/bin:${PATH}"
+
+RUN apt-get update && \
+    apt-get install -y wget && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN wget \
+    https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh \
+    && mkdir /root/.conda \
+    && bash Miniconda3-latest-Linux-aarch64.sh -b \
+    && rm -f Miniconda3-latest-Linux-aarch64.sh 
+RUN conda --version
+
+ADD ./conda.yaml .
+RUN conda env update -f conda.yaml
+
+ENV PYTHONPATH=/mlflow/projects/code
+
+ADD ./Dockerfiles/entrypoint.sh /usr/local/bin/
+ENTRYPOINT ["conda", "run", "-n", "wine-quality-predictor", "entrypoint.sh"]

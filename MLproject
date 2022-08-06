@@ -1,0 +1,21 @@
+name: wine-quality-predictor
+
+# use conda env
+conda_env: conda.yaml
+# or
+# use docker
+# docker_env: 
+#   image: dmitryb/wine-quality-predictor:base
+
+entry_points:
+  # train elastic net model
+  train_elasticnet:
+    parameters:
+      alpha: float
+      l1_ratio: {type: float, default: 0.1}
+    command: "python jobs/train_elasticnet/train.py --alpha {alpha} --l1_ratio {l1_ratio}"
+  train_dnn:
+    parameters:
+      lr: {type: float, default: 0.0001}
+      n_epochs: {type: int, default: 10}
+    command: "python jobs/train_dnn_fc/train.py --lr {lr} --n_epochs {n_epochs}"

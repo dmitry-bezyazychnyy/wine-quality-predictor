@@ -1,0 +1,377 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: wine-quality-predictor-
+  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.13, pipelines.kubeflow.org/pipeline_compilation_time: '2022-08-06T15:40:07.991677',
+    pipelines.kubeflow.org/pipeline_spec: '{"description": "Train model for wine-quality-predictor
+      project", "inputs": [{"default": "[1, 2, 3]", "name": "target_dimensions", "optional":
+      true, "type": "typing.List[int]"}, {"default": "0.7", "name": "alpha", "optional":
+      true, "type": "Float"}, {"default": "0.5", "name": "l1_ratio", "optional": true,
+      "type": "Float"}], "name": "wine-quality-predictor"}'}
+  labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.8.13}
+spec:
+  entrypoint: wine-quality-predictor
+  templates:
+  - name: condition-2
+    inputs:
+      parameters:
+      - {name: target_dimensions-loop-item}
+      - {name: train-elasticnet-model-model_url}
+    dag:
+      tasks:
+      - name: model-deployment
+        template: model-deployment
+        dependencies: [publish-model]
+        arguments:
+          parameters:
+          - {name: publish-model-name, value: '{{tasks.publish-model.outputs.parameters.publish-model-name}}'}
+          - {name: publish-model-version, value: '{{tasks.publish-model.outputs.parameters.publish-model-version}}'}
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+      - name: publish-model
+        template: publish-model
+        arguments:
+          parameters:
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+          - {name: train-elasticnet-model-model_url, value: '{{inputs.parameters.train-elasticnet-model-model_url}}'}
+  - name: condition-3
+    inputs:
+      parameters:
+      - {name: target_dimensions-loop-item}
+    dag:
+      tasks:
+      - name: validation-failed
+        template: validation-failed
+        arguments:
+          parameters:
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+  - name: for-loop-1
+    inputs:
+      parameters:
+      - {name: alpha}
+      - {name: l1_ratio}
+      - {name: target_dimensions-loop-item}
+    dag:
+      tasks:
+      - name: condition-2
+        template: condition-2
+        when: '"{{tasks.validate-model.outputs.parameters.validate-model-Output}}"
+          == "1"'
+        dependencies: [train-elasticnet-model, validate-model]
+        arguments:
+          parameters:
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+          - {name: train-elasticnet-model-model_url, value: '{{tasks.train-elasticnet-model.outputs.parameters.train-elasticnet-model-model_url}}'}
+      - name: condition-3
+        template: condition-3
+        when: '"{{tasks.validate-model.outputs.parameters.validate-model-Output}}"
+          == "0"'
+        dependencies: [validate-model]
+        arguments:
+          parameters:
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+      - name: train-elasticnet-model
+        template: train-elasticnet-model
+        arguments:
+          parameters:
+          - {name: alpha, value: '{{inputs.parameters.alpha}}'}
+          - {name: l1_ratio, value: '{{inputs.parameters.l1_ratio}}'}
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+      - name: validate-model
+        template: validate-model
+        dependencies: [train-elasticnet-model]
+        arguments:
+          parameters:
+          - {name: target_dimensions-loop-item, value: '{{inputs.parameters.target_dimensions-loop-item}}'}
+          - {name: train-elasticnet-model-rmse, value: '{{tasks.train-elasticnet-model.outputs.parameters.train-elasticnet-model-rmse}}'}
+  - name: model-deployment
+    container:
+      args: ['echo updating serving for model={{inputs.parameters.publish-model-name}}:{{inputs.parameters.publish-model-version}}
+          on dimention={{inputs.parameters.target_dimensions-loop-item}}']
+      command: [sh, -c]
+      image: library/bash:4.4.23
+    inputs:
+      parameters:
+      - {name: publish-model-name}
+      - {name: publish-model-version}
+      - {name: target_dimensions-loop-item}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.13
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+  - name: publish-model
+    container:
+      args: [--artifact-uri, '{{inputs.parameters.train-elasticnet-model-model_url}}',
+        --model-name, wine-quality.elasticnet.v1, --dimension, '{{inputs.parameters.target_dimensions-loop-item}}',
+        '----output-paths', /tmp/outputs/name/data, /tmp/outputs/version/data]
+      command:
+      - sh
+      - -ec
+      - |
+        program_path=$(mktemp)
+        printf "%s" "$0" > "$program_path"
+        python3 -u "$program_path" "$@"
+      - |
+        def _publish_model(
+            artifact_uri, model_name, dimension = None
+        ):
+            """ returns model (name,version) """
+            import os
+            from collections import namedtuple
+
+            import mlflow
+            from mlflow.entities.model_registry import ModelVersion
+
+            # TODO: use .set_env() for operator
+            os.environ["MLFLOW_TRACKING_URI"] = "http://mlflow-service.mlflow:8081"
+            # final model name: model_name.dimension
+            model_name = model_name if dimension is None else f"{model_name}.{dimension}"
+            mv: ModelVersion = mlflow.register_model(artifact_uri, model_name)
+            print(f"published successfully as {mv.name}:{mv.version}")
+            name_version = namedtuple("ModelVersion", ["name", "version"])
+            return name_version(mv.name, mv.version)
+
+        def _serialize_int(int_value: int) -> str:
+            if isinstance(int_value, str):
+                return int_value
+            if not isinstance(int_value, int):
+                raise TypeError('Value "{}" has type "{}" instead of int.'.format(
+                    str(int_value), str(type(int_value))))
+            return str(int_value)
+
+        def _serialize_str(str_value: str) -> str:
+            if not isinstance(str_value, str):
+                raise TypeError('Value "{}" has type "{}" instead of str.'.format(
+                    str(str_value), str(type(str_value))))
+            return str_value
+
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Publish model', description='returns model (name,version)')
+        _parser.add_argument("--artifact-uri", dest="artifact_uri", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--model-name", dest="model_name", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--dimension", dest="dimension", type=int, required=False, default=argparse.SUPPRESS)
+        _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=2)
+        _parsed_args = vars(_parser.parse_args())
+        _output_files = _parsed_args.pop("_output_paths", [])
+
+        _outputs = _publish_model(**_parsed_args)
+
+        _output_serializers = [
+            _serialize_str,
+            _serialize_int,
+
+        ]
+
+        import os
+        for idx, output_file in enumerate(_output_files):
+            try:
+                os.makedirs(os.path.dirname(output_file))
+            except OSError:
+                pass
+            with open(output_file, 'w') as f:
+                f.write(_output_serializers[idx](_outputs[idx]))
+      image: dmitryb/wine-quality-predictor:latest
+    inputs:
+      parameters:
+      - {name: target_dimensions-loop-item}
+      - {name: train-elasticnet-model-model_url}
+    outputs:
+      parameters:
+      - name: publish-model-name
+        valueFrom: {path: /tmp/outputs/name/data}
+      - name: publish-model-version
+        valueFrom: {path: /tmp/outputs/version/data}
+      artifacts:
+      - {name: publish-model-name, path: /tmp/outputs/name/data}
+      - {name: publish-model-version, path: /tmp/outputs/version/data}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.13
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+      annotations: {pipelines.kubeflow.org/component_spec: '{"description": "returns
+          model (name,version)", "implementation": {"container": {"args": ["--artifact-uri",
+          {"inputValue": "artifact_uri"}, "--model-name", {"inputValue": "model_name"},
+          {"if": {"cond": {"isPresent": "dimension"}, "then": ["--dimension", {"inputValue":
+          "dimension"}]}}, "----output-paths", {"outputPath": "name"}, {"outputPath":
+          "version"}], "command": ["sh", "-ec", "program_path=$(mktemp)\nprintf \"%s\"
+          \"$0\" > \"$program_path\"\npython3 -u \"$program_path\" \"$@\"\n", "def
+          _publish_model(\n    artifact_uri, model_name, dimension = None\n):\n    \"\"\"
+          returns model (name,version) \"\"\"\n    import os\n    from collections
+          import namedtuple\n\n    import mlflow\n    from mlflow.entities.model_registry
+          import ModelVersion\n\n    # TODO: use .set_env() for operator\n    os.environ[\"MLFLOW_TRACKING_URI\"]
+          = \"http://mlflow-service.mlflow:8081\"\n    # final model name: model_name.dimension\n    model_name
+          = model_name if dimension is None else f\"{model_name}.{dimension}\"\n    mv:
+          ModelVersion = mlflow.register_model(artifact_uri, model_name)\n    print(f\"published
+          successfully as {mv.name}:{mv.version}\")\n    name_version = namedtuple(\"ModelVersion\",
+          [\"name\", \"version\"])\n    return name_version(mv.name, mv.version)\n\ndef
+          _serialize_int(int_value: int) -> str:\n    if isinstance(int_value, str):\n        return
+          int_value\n    if not isinstance(int_value, int):\n        raise TypeError(''Value
+          \"{}\" has type \"{}\" instead of int.''.format(\n            str(int_value),
+          str(type(int_value))))\n    return str(int_value)\n\ndef _serialize_str(str_value:
+          str) -> str:\n    if not isinstance(str_value, str):\n        raise TypeError(''Value
+          \"{}\" has type \"{}\" instead of str.''.format(\n            str(str_value),
+          str(type(str_value))))\n    return str_value\n\nimport argparse\n_parser
+          = argparse.ArgumentParser(prog=''Publish model'', description=''returns
+          model (name,version)'')\n_parser.add_argument(\"--artifact-uri\", dest=\"artifact_uri\",
+          type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--model-name\",
+          dest=\"model_name\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--dimension\",
+          dest=\"dimension\", type=int, required=False, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=2)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = _publish_model(**_parsed_args)\n\n_output_serializers
+          = [\n    _serialize_str,\n    _serialize_int,\n\n]\n\nimport os\nfor idx,
+          output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "dmitryb/wine-quality-predictor:latest"}}, "inputs": [{"name":
+          "artifact_uri", "type": "String"}, {"name": "model_name", "type": "String"},
+          {"name": "dimension", "optional": true, "type": "Integer"}], "name": "Publish
+          model", "outputs": [{"name": "name", "type": "String"}, {"name": "version",
+          "type": "Integer"}]}', pipelines.kubeflow.org/component_ref: '{}', pipelines.kubeflow.org/arguments.parameters: '{"artifact_uri":
+          "{{inputs.parameters.train-elasticnet-model-model_url}}", "dimension": "{{inputs.parameters.target_dimensions-loop-item}}",
+          "model_name": "wine-quality.elasticnet.v1"}'}
+  - name: train-elasticnet-model
+    container:
+      args: ['python jobs/train_elasticnet/train.py --alpha {{inputs.parameters.alpha}}
+          --l1_ratio {{inputs.parameters.l1_ratio}} --dimension {{inputs.parameters.target_dimensions-loop-item}}']
+      command: [sh, -c]
+      env:
+      - {name: MLFLOW_TRACKING_URI, value: 'http://mlflow-service.mlflow:8081'}
+      - {name: MLFLOW_S3_ENDPOINT_URL, value: 'http://minio-service.minio:8081'}
+      - {name: AWS_ACCESS_KEY_ID, value: minio123}
+      - {name: AWS_SECRET_ACCESS_KEY, value: minio123}
+      image: dmitryb/wine-quality-predictor:latest
+      resources:
+        limits: {cpu: 100m, memory: 256Mi}
+    inputs:
+      parameters:
+      - {name: alpha}
+      - {name: l1_ratio}
+      - {name: target_dimensions-loop-item}
+    outputs:
+      parameters:
+      - name: train-elasticnet-model-model_url
+        valueFrom: {path: /tmp/outputs/model_url/data}
+      - name: train-elasticnet-model-rmse
+        valueFrom: {path: /tmp/outputs/rmse/data}
+      artifacts:
+      - {name: train-elasticnet-model-mae, path: /tmp/outputs/mae/data}
+      - {name: train-elasticnet-model-model_url, path: /tmp/outputs/model_url/data}
+      - {name: train-elasticnet-model-r2, path: /tmp/outputs/r2/data}
+      - {name: train-elasticnet-model-rmse, path: /tmp/outputs/rmse/data}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.13
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+    retryStrategy: {limit: 1}
+  - name: validate-model
+    container:
+      args: [--dimension, '{{inputs.parameters.target_dimensions-loop-item}}', --rmse,
+        '{{inputs.parameters.train-elasticnet-model-rmse}}', '----output-paths', /tmp/outputs/Output/data]
+      command:
+      - sh
+      - -ec
+      - |
+        program_path=$(mktemp)
+        printf "%s" "$0" > "$program_path"
+        python3 -u "$program_path" "$@"
+      - "def validate_model(dimension, rmse):\n    \"\"\" \n        Validates a model\
+        \ using custom validation strategu\n        returns 1 if validation was successful,\
+        \ otherwise 0\n    \"\"\"\n    print(f\"validating model for dimetion: {dimension}\"\
+        )\n    if rmse > 0.8:\n        return 1\n    else:\n        return 0\n\ndef\
+        \ _serialize_int(int_value: int) -> str:\n    if isinstance(int_value, str):\n\
+        \        return int_value\n    if not isinstance(int_value, int):\n      \
+        \  raise TypeError('Value \"{}\" has type \"{}\" instead of int.'.format(\n\
+        \            str(int_value), str(type(int_value))))\n    return str(int_value)\n\
+        \nimport argparse\n_parser = argparse.ArgumentParser(prog='Validate model',\
+        \ description='Validates a model using custom validation strategu')\n_parser.add_argument(\"\
+        --dimension\", dest=\"dimension\", type=int, required=True, default=argparse.SUPPRESS)\n\
+        _parser.add_argument(\"--rmse\", dest=\"rmse\", type=float, required=True,\
+        \ default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\", dest=\"\
+        _output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n\
+        _output_files = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = validate_model(**_parsed_args)\n\
+        \n_outputs = [_outputs]\n\n_output_serializers = [\n    _serialize_int,\n\n\
+        ]\n\nimport os\nfor idx, output_file in enumerate(_output_files):\n    try:\n\
+        \        os.makedirs(os.path.dirname(output_file))\n    except OSError:\n\
+        \        pass\n    with open(output_file, 'w') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"
+      image: dmitryb/wine-quality-predictor:latest
+      resources:
+        limits: {cpu: 100m, memory: 256Mi}
+    inputs:
+      parameters:
+      - {name: target_dimensions-loop-item}
+      - {name: train-elasticnet-model-rmse}
+    outputs:
+      parameters:
+      - name: validate-model-Output
+        valueFrom: {path: /tmp/outputs/Output/data}
+      artifacts:
+      - {name: validate-model-Output, path: /tmp/outputs/Output/data}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.13
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+      annotations: {pipelines.kubeflow.org/component_spec: '{"description": "Validates
+          a model using custom validation strategu", "implementation": {"container":
+          {"args": ["--dimension", {"inputValue": "dimension"}, "--rmse", {"inputValue":
+          "rmse"}, "----output-paths", {"outputPath": "Output"}], "command": ["sh",
+          "-ec", "program_path=$(mktemp)\nprintf \"%s\" \"$0\" > \"$program_path\"\npython3
+          -u \"$program_path\" \"$@\"\n", "def validate_model(dimension, rmse):\n    \"\"\"
+          \n        Validates a model using custom validation strategu\n        returns
+          1 if validation was successful, otherwise 0\n    \"\"\"\n    print(f\"validating
+          model for dimetion: {dimension}\")\n    if rmse > 0.8:\n        return 1\n    else:\n        return
+          0\n\ndef _serialize_int(int_value: int) -> str:\n    if isinstance(int_value,
+          str):\n        return int_value\n    if not isinstance(int_value, int):\n        raise
+          TypeError(''Value \"{}\" has type \"{}\" instead of int.''.format(\n            str(int_value),
+          str(type(int_value))))\n    return str(int_value)\n\nimport argparse\n_parser
+          = argparse.ArgumentParser(prog=''Validate model'', description=''Validates
+          a model using custom validation strategu'')\n_parser.add_argument(\"--dimension\",
+          dest=\"dimension\", type=int, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--rmse\",
+          dest=\"rmse\", type=float, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = validate_model(**_parsed_args)\n\n_outputs
+          = [_outputs]\n\n_output_serializers = [\n    _serialize_int,\n\n]\n\nimport
+          os\nfor idx, output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "dmitryb/wine-quality-predictor:latest"}}, "inputs": [{"name":
+          "dimension", "type": "Integer"}, {"name": "rmse", "type": "Float"}], "name":
+          "Validate model", "outputs": [{"name": "Output", "type": "Integer"}]}',
+        pipelines.kubeflow.org/component_ref: '{}', pipelines.kubeflow.org/arguments.parameters: '{"dimension":
+          "{{inputs.parameters.target_dimensions-loop-item}}", "rmse": "{{inputs.parameters.train-elasticnet-model-rmse}}"}'}
+  - name: validation-failed
+    container:
+      args: [echo, 'Validation model for dimetion {{inputs.parameters.target_dimensions-loop-item}}
+          failed. Check logs for details']
+      command: [sh, -c]
+      image: library/bash:4.4.23
+    inputs:
+      parameters:
+      - {name: target_dimensions-loop-item}
+    metadata:
+      labels:
+        pipelines.kubeflow.org/kfp_sdk_version: 1.8.13
+        pipelines.kubeflow.org/pipeline-sdk-type: kfp
+        pipelines.kubeflow.org/enable_caching: "true"
+  - name: wine-quality-predictor
+    inputs:
+      parameters:
+      - {name: alpha}
+      - {name: l1_ratio}
+    dag:
+      tasks:
+      - name: for-loop-1
+        template: for-loop-1
+        arguments:
+          parameters:
+          - {name: alpha, value: '{{inputs.parameters.alpha}}'}
+          - {name: l1_ratio, value: '{{inputs.parameters.l1_ratio}}'}
+          - {name: target_dimensions-loop-item, value: '{{item}}'}
+        withParam: '{{workflow.parameters.target_dimensions}}'
+  arguments:
+    parameters:
+    - {name: target_dimensions, value: '[1, 2, 3]'}
+    - {name: alpha, value: '0.7'}
+    - {name: l1_ratio, value: '0.5'}
+  serviceAccountName: default
+  parallelism: 3
